@@ -21,6 +21,89 @@
 
 ---
 
+## What Is a Transaction?
+
+A **transaction** is a sequence of one or more SQL statements that the database treats as a **single, indivisible unit of work**. Either **all** the statements in the transaction succeed and their effects become permanent, or **none** of them do — there is no in-between state visible to other users of the database.
+
+### The Basic Lifecycle
+
+```sql
+-- Start a transaction explicitly
+BEGIN;
+
+-- Execute one or more statements inside the transaction
+UPDATE accounts SET balance = balance - 500 WHERE id = 1;
+UPDATE accounts SET balance = balance + 500 WHERE id = 2;
+
+-- Make all changes permanent
+COMMIT;
+```
+
+If anything goes wrong — a constraint violation, a deadlock, an application error, or an explicit decision to abort — you roll back:
+
+```sql
+BEGIN;
+UPDATE accounts SET balance = balance - 500 WHERE id = 1;
+-- Oops, wrong target account
+ROLLBACK;
+-- Both UPDATEs are undone; the database is exactly as it was before BEGIN
+```
+
+> **Key point**: Until `COMMIT` is executed, the changes made inside a transaction are **tentative**. They can be undone entirely with `ROLLBACK`, and (in PostgreSQL) they are **invisible** to other concurrent transactions.
+
+> **Do you always need to write `ROLLBACK` explicitly?** No. If the client disconnects, the application crashes, or a fatal error kills the session, PostgreSQL automatically rolls back any open transaction. Explicit `ROLLBACK` is for when your **application logic** decides to abort — for example, a validation check fails and you want to undo everything done so far in the transaction.
+
+### Implicit (Auto-Commit) vs. Explicit Transactions
+
+When you run a single statement without an explicit `BEGIN`, PostgreSQL wraps it in an **implicit transaction** automatically:
+
+```sql
+-- This single statement is its own transaction (auto-commit mode)
+INSERT INTO logs (message) VALUES ('server started');
+-- PostgreSQL internally does: BEGIN; INSERT ...; COMMIT;
+
+-- Equivalent explicit version:
+BEGIN;
+INSERT INTO logs (message) VALUES ('server started');
+COMMIT;
+```
+
+Auto-commit is convenient for one-off statements, but any operation that involves **multiple steps that must succeed or fail together** requires an explicit transaction:
+
+```sql
+-- Without explicit transaction: if the second UPDATE fails,
+-- the first UPDATE is ALREADY committed — money vanishes!
+UPDATE accounts SET balance = balance - 500 WHERE id = 1;  -- committed immediately
+UPDATE accounts SET balance = balance + 500 WHERE id = 2;  -- fails → money is gone!
+
+-- With explicit transaction: either BOTH succeed or NEITHER does
+BEGIN;
+UPDATE accounts SET balance = balance - 500 WHERE id = 1;
+UPDATE accounts SET balance = balance + 500 WHERE id = 2;
+COMMIT;  -- atomic: both applied, or on error, both rolled back
+```
+
+### The ACID Guarantees
+
+Transactions provide the **ACID** guarantees — the properties that make databases reliable:
+
+| Property        | What It Means                                                                                                                                                                | Example                                                                                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **Atomicity**   | All statements in the transaction succeed together, or none of them take effect. There are no partial results.                                                               | A bank transfer debits one account and credits another. If the credit fails, the debit is also rolled back. |
+| **Consistency** | The transaction moves the database from one valid state to another. All constraints (PRIMARY KEY, FOREIGN KEY, CHECK, UNIQUE) are satisfied after the transaction completes. | You can't end a transfer with a negative balance if a `CHECK (balance >= 0)` constraint exists.             |
+| **Isolation**   | Concurrent transactions don't interfere with each other. Each transaction behaves **as if** it were the only one running, to a degree controlled by the **isolation level**. | Two users reading the same account at the same time each see a consistent view, not a half-written update.  |
+| **Durability**  | Once a transaction is committed, its changes survive crashes, power failures, and restarts.                                                                                  | After `COMMIT` returns, the data is safely on disk (via the Write-Ahead Log).                               |
+
+### Why Transactions Matter for Locking
+
+Every concept in this tutorial — locks, isolation levels, MVCC, deadlocks — operates **within the context of transactions**:
+
+- **Locks are held for the duration of the transaction.** A row locked by `SELECT FOR UPDATE` stays locked until the transaction ends with `COMMIT` or `ROLLBACK`. This is why long transactions are dangerous — they hold locks longer, blocking other work.
+- **Isolation levels are set per transaction.** They control what data a transaction can see while other concurrent transactions are modifying the database.
+- **Deadlocks happen between transactions.** When two transactions each hold a lock the other needs, neither can proceed.
+- **MVCC snapshots are scoped to transactions** (or to individual statements, depending on the isolation level). The snapshot determines which row versions are visible.
+
+In short: **transactions are the unit of concurrency.** Everything that follows in this tutorial is about how the database manages multiple transactions running at the same time.
 
 # Chapter 1: Why Locks Exist — The Concurrency Problem
 
@@ -229,12 +312,12 @@ COMMIT;
 
 ## How ACID Maps to Locks
 
-| Property      | Mechanism                          | How Locks Help                              |
-|---------------|------------------------------------|--------------------------------------------|
-| **Atomicity** | WAL (Write-Ahead Log), undo       | Locks protect undo log consistency          |
-| **Consistency** | Constraints, triggers            | Locks ensure constraint checks see stable data |
-| **Isolation** | **Locks + MVCC**                   | **Primary mechanism** — controls visibility |
-| **Durability** | WAL, fsync, checkpoints           | Not directly related to locks               |
+| Property        | Mechanism                   | How Locks Help                                 |
+| --------------- | --------------------------- | ---------------------------------------------- |
+| **Atomicity**   | WAL (Write-Ahead Log), undo | Locks protect undo log consistency             |
+| **Consistency** | Constraints, triggers       | Locks ensure constraint checks see stable data |
+| **Isolation**   | **Locks + MVCC**            | **Primary mechanism** — controls visibility    |
+| **Durability**  | WAL, fsync, checkpoints     | Not directly related to locks                  |
 
 ## PostgreSQL's Approach: MVCC + Locks
 
@@ -247,8 +330,6 @@ PostgreSQL uses a **hybrid** approach. It doesn't rely purely on locks (which wo
 This is fundamentally different from databases like SQL Server that use a **lock-based** model where readers acquire shared locks that block writers (unless you enable RCSI — Read Committed Snapshot Isolation).
 
 > **Key takeaway**: In PostgreSQL, the word "lock" most often refers to **write locks** (row-level exclusive locks for UPDATE/DELETE) and **explicit locks** (FOR UPDATE, FOR SHARE, LOCK TABLE). Regular `SELECT` statements acquire no row locks — they use MVCC snapshots instead.
-
-
 
 # Chapter 2: Lock Types in PostgreSQL — A Deep Taxonomy
 
@@ -263,17 +344,17 @@ PostgreSQL defines **eight** table-level lock modes, from weakest to strongest. 
 ### The Full Compatibility Matrix
 
 | Lock Mode               | AS  | RS  | RE  | SUE | S   | SRE | E   | AE  |
-|--------------------------|-----|-----|-----|-----|-----|-----|-----|-----|
-| ACCESS SHARE (AS)        | ✅  | ✅  | ✅  | ✅  | ✅  | ✅  | ✅  | ❌  |
-| ROW SHARE (RS)           | ✅  | ✅  | ✅  | ✅  | ✅  | ✅  | ❌  | ❌  |
-| ROW EXCLUSIVE (RE)       | ✅  | ✅  | ✅  | ✅  | ❌  | ❌  | ❌  | ❌  |
-| SHARE UPDATE EXCL (SUE)  | ✅  | ✅  | ✅  | ❌  | ❌  | ❌  | ❌  | ❌  |
-| SHARE (S)                | ✅  | ✅  | ❌  | ❌  | ✅  | ❌  | ❌  | ❌  |
-| SHARE ROW EXCL (SRE)     | ✅  | ✅  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  |
-| EXCLUSIVE (E)            | ✅  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  |
-| ACCESS EXCLUSIVE (AE)    | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  |
+| ----------------------- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ACCESS SHARE (AS)       | ✅  | ✅  | ✅  | ✅  | ✅  | ✅  | ✅  | ❌  |
+| ROW SHARE (RS)          | ✅  | ✅  | ✅  | ✅  | ✅  | ✅  | ❌  | ❌  |
+| ROW EXCLUSIVE (RE)      | ✅  | ✅  | ✅  | ✅  | ❌  | ❌  | ❌  | ❌  |
+| SHARE UPDATE EXCL (SUE) | ✅  | ✅  | ✅  | ❌  | ❌  | ❌  | ❌  | ❌  |
+| SHARE (S)               | ✅  | ✅  | ❌  | ❌  | ✅  | ❌  | ❌  | ❌  |
+| SHARE ROW EXCL (SRE)    | ✅  | ✅  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  |
+| EXCLUSIVE (E)           | ✅  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  |
+| ACCESS EXCLUSIVE (AE)   | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  | ❌  |
 
-*(✅ = compatible, ❌ = conflicts)*
+_(✅ = compatible, ❌ = conflicts)_
 
 ### Which Operations Acquire Which Lock?
 
@@ -350,12 +431,12 @@ PostgreSQL has four row-level lock modes, each acquired by different SQL pattern
 
 ### The Four Row-Level Lock Modes
 
-| Row Lock Mode           | Acquired By                        | Blocks                    |
-|------------------------|------------------------------------|---------------------------|
-| **FOR KEY SHARE**       | `SELECT FOR KEY SHARE`            | FOR UPDATE only           |
-| **FOR SHARE**           | `SELECT FOR SHARE`                | FOR UPDATE, FOR NO KEY UPDATE |
-| **FOR NO KEY UPDATE**   | `UPDATE` (not touching key cols)  | FOR UPDATE, FOR SHARE, FOR NO KEY UPDATE |
-| **FOR UPDATE**          | `SELECT FOR UPDATE`, `UPDATE` (key cols), `DELETE` | All other row locks |
+| Row Lock Mode         | Acquired By                                        | Blocks                                   |
+| --------------------- | -------------------------------------------------- | ---------------------------------------- |
+| **FOR KEY SHARE**     | `SELECT FOR KEY SHARE`                             | FOR UPDATE only                          |
+| **FOR SHARE**         | `SELECT FOR SHARE`                                 | FOR UPDATE, FOR NO KEY UPDATE            |
+| **FOR NO KEY UPDATE** | `UPDATE` (not touching key cols)                   | FOR UPDATE, FOR SHARE, FOR NO KEY UPDATE |
+| **FOR UPDATE**        | `SELECT FOR UPDATE`, `UPDATE` (key cols), `DELETE` | All other row locks                      |
 
 ### FOR KEY SHARE — The Lightweight Lock
 
@@ -414,6 +495,7 @@ Tuple Header (PostgreSQL):
 ```
 
 When a transaction acquires a row lock (e.g., `SELECT FOR UPDATE`):
+
 1. `t_xmax` is set to the locking transaction's XID
 2. `t_infomask` has `HEAP_XMAX_LOCK_ONLY` set (to distinguish from a real delete)
 3. The row is NOT duplicated — the lock is stored in-place
@@ -458,8 +540,6 @@ ORDER BY 3 DESC;
 -- lock_manager       → Lock table contention, too many fine-grained locks
 -- XactSLRU           → Transaction status cache contention
 ```
-
-
 
 # Chapter 3: Lock Granularity in PostgreSQL
 
@@ -509,11 +589,13 @@ WHERE created_at < '2024-01-01';
 In SQL Server, if a single transaction acquires more than ~5000 row locks on a table, it escalates to a table lock to save memory. PostgreSQL avoids this by storing row lock info **in the tuple header** (the `t_xmax` field discussed in Chapter 2), not in a shared memory lock table.
 
 **Advantages of no escalation:**
+
 - Predictable behavior — a bulk UPDATE won't suddenly block all readers
 - No surprise contention spikes
 - Simpler mental model
 
 **Disadvantages:**
+
 - Updating millions of rows creates millions of dead tuples (MVCC overhead)
 - VACUUM must clean all those dead tuples
 - Large UPDATE/DELETE batches should be chunked for VACUUM friendliness
@@ -679,22 +761,20 @@ WHERE l.locktype = 'advisory';
 
 > **Warning**: Advisory locks are shared across the entire database cluster. If two applications use the same lock ID for different purposes, they'll interfere with each other. Always namespace your lock IDs (e.g., use `hashtext('app_name:purpose:id')`).
 
-
-
 # Chapter 4: Pessimistic vs. Optimistic Locking — A Deep Comparison
 
 ## The Core Philosophy
 
 These are two **strategies** for handling concurrent modifications — not specific lock types. The choice is one of the most impactful concurrency decisions you'll make as a backend engineer.
 
-| Aspect | Pessimistic | Optimistic |
-|--------|-------------|------------|
-| **Assumption** | Conflicts are *likely* | Conflicts are *rare* |
-| **When locks are acquired** | *Before* reading data | Never (conflict check at write time) |
-| **Conflict handling** | Other transactions *wait* | Failed transactions *retry* |
-| **Implementation** | Database-level locks | Application-level version checks |
-| **Throughput** | Lower under contention | Higher when conflicts rare |
-| **Correctness guarantee** | Immediate (lock prevents conflict) | Deferred (detected at write time) |
+| Aspect                      | Pessimistic                        | Optimistic                           |
+| --------------------------- | ---------------------------------- | ------------------------------------ |
+| **Assumption**              | Conflicts are _likely_             | Conflicts are _rare_                 |
+| **When locks are acquired** | _Before_ reading data              | Never (conflict check at write time) |
+| **Conflict handling**       | Other transactions _wait_          | Failed transactions _retry_          |
+| **Implementation**          | Database-level locks               | Application-level version checks     |
+| **Throughput**              | Lower under contention             | Higher when conflicts rare           |
+| **Correctness guarantee**   | Immediate (lock prevents conflict) | Deferred (detected at write time)    |
 
 ## Pessimistic Locking in PostgreSQL
 
@@ -930,19 +1010,17 @@ UPDATE accounts SET balance = 1200 WHERE id = 1;
 
 ## Decision Matrix: When to Use Which
 
-| Scenario | Recommended | Why |
-|----------|-------------|-----|
-| Bank transfer between accounts | **Pessimistic** (FOR UPDATE) | High contention on hot rows; incorrect balance is unacceptable |
-| Editing a CMS article | **Optimistic** (version column) | Low contention; can show "conflict" UI to user |
-| Inventory deduction (e-commerce) | **Pessimistic** (FOR UPDATE) | Overselling is catastrophic; contention is real during flash sales |
-| User profile update | **Optimistic** (version column) | Very low contention; users rarely update simultaneously |
-| Job queue processing | **Pessimistic** (FOR UPDATE SKIP LOCKED) | Multiple workers competing for the same jobs |
-| Distributed cache invalidation | **Optimistic** (CAS with Redis or version) | High throughput needed; stale reads are tolerable briefly |
-| Analytics counter increment | **Neither** — use atomic UPDATE | `UPDATE counters SET value = value + 1` avoids both |
+| Scenario                         | Recommended                                | Why                                                                |
+| -------------------------------- | ------------------------------------------ | ------------------------------------------------------------------ |
+| Bank transfer between accounts   | **Pessimistic** (FOR UPDATE)               | High contention on hot rows; incorrect balance is unacceptable     |
+| Editing a CMS article            | **Optimistic** (version column)            | Low contention; can show "conflict" UI to user                     |
+| Inventory deduction (e-commerce) | **Pessimistic** (FOR UPDATE)               | Overselling is catastrophic; contention is real during flash sales |
+| User profile update              | **Optimistic** (version column)            | Very low contention; users rarely update simultaneously            |
+| Job queue processing             | **Pessimistic** (FOR UPDATE SKIP LOCKED)   | Multiple workers competing for the same jobs                       |
+| Distributed cache invalidation   | **Optimistic** (CAS with Redis or version) | High throughput needed; stale reads are tolerable briefly          |
+| Analytics counter increment      | **Neither** — use atomic UPDATE            | `UPDATE counters SET value = value + 1` avoids both                |
 
 > **Rule of thumb**: If the consequence of a conflict is **data loss or financial error**, use pessimistic locking. If the consequence is a **user-visible retry or merge**, use optimistic locking. If you can restructure the query to be **atomic** (no read-modify-write), do that instead.
-
-
 
 # Chapter 5: Isolation Levels — PostgreSQL Deep Dive
 
@@ -1135,6 +1213,7 @@ SELECT * FROM orders WHERE id = 1 FOR UPDATE;
 ```
 
 This strict adherence to the snapshot means you **never** see inconsistent data in `REPEATABLE READ` in PostgreSQL, but you must be prepared to catch serialization errors and retry the transaction.
+
 ```
 
 ## SERIALIZABLE — True Serializability via SSI
@@ -1144,17 +1223,19 @@ This strict adherence to the snapshot means you **never** see inconsistent data 
 PostgreSQL's SERIALIZABLE level uses **Serializable Snapshot Isolation (SSI)**, a cutting-edge algorithm published by Cahill et al., 2008. It is fundamentally different from traditional lock-based serializable implementations (SQL Server) or gap-locking approaches (MySQL/InnoDB).
 
 ```
+
 Traditional (SQL Server / MySQL):
-  Readers acquire shared locks → block writers
-  Writers acquire exclusive locks → block readers AND writers
-  Result: low concurrency but prevents all anomalies
+Readers acquire shared locks → block writers
+Writers acquire exclusive locks → block readers AND writers
+Result: low concurrency but prevents all anomalies
 
 PostgreSQL SSI:
-  Readers take MVCC snapshots → NEVER block writers
-  Writers acquire row locks → only block other writers on the SAME row
-  SSI tracks read-write dependencies between transactions
-  If a dangerous pattern (rw-antidependency cycle) is detected → ABORT one txn
-  Result: high concurrency but requires application-level RETRY logic
+Readers take MVCC snapshots → NEVER block writers
+Writers acquire row locks → only block other writers on the SAME row
+SSI tracks read-write dependencies between transactions
+If a dangerous pattern (rw-antidependency cycle) is detected → ABORT one txn
+Result: high concurrency but requires application-level RETRY logic
+
 ```
 
 ### The Dependencies SSI Tracks
@@ -1162,6 +1243,7 @@ PostgreSQL SSI:
 SSI tracks three types of dependencies between transactions:
 
 ```
+
 1. WR-dependency (write-read):
    T1 writes a row, T2 reads that row (from T1's committed version)
 
@@ -1174,7 +1256,8 @@ SSI tracks three types of dependencies between transactions:
 
 SSI detects cycles containing RW-antidependencies.
 If found: one transaction is aborted with serialization_failure.
-```
+
+````
 
 ### SSI in Practice
 
@@ -1194,7 +1277,7 @@ COMMIT;
 -- ERROR: could not serialize access due to read/write dependencies among transactions
 -- DETAIL: Reason code: Canceled on identification as a pivot, during commit attempt.
 -- HINT: The transaction might succeed if retried.
-```
+````
 
 ### Essential Retry Logic
 
@@ -1254,14 +1337,14 @@ SHOW max_pred_locks_per_page;          -- default 2
 ### Comparison Across Isolation Levels
 
 | Anomaly             | READ COMMITTED | REPEATABLE READ | SERIALIZABLE |
-|---------------------|:--------------:|:---------------:|:------------:|
-| Dirty Read          | ❌ Prevented   | ❌ Prevented    | ❌ Prevented |
-| Non-Repeatable Read | ✅ Possible    | ❌ Prevented    | ❌ Prevented |
-| Phantom Read        | ✅ Possible    | ❌ Prevented    | ❌ Prevented |
-| Lost Update         | ✅ Possible    | ❌ Detected*    | ❌ Detected  |
-| Write Skew          | ✅ Possible    | ✅ Possible     | ❌ Detected  |
+| ------------------- | :------------: | :-------------: | :----------: |
+| Dirty Read          |  ❌ Prevented  |  ❌ Prevented   | ❌ Prevented |
+| Non-Repeatable Read |  ✅ Possible   |  ❌ Prevented   | ❌ Prevented |
+| Phantom Read        |  ✅ Possible   |  ❌ Prevented   | ❌ Prevented |
+| Lost Update         |  ✅ Possible   |  ❌ Detected\*  | ❌ Detected  |
+| Write Skew          |  ✅ Possible   |   ✅ Possible   | ❌ Detected  |
 
-*UPDATE or SELECT FOR UPDATE raises error: "could not serialize access due to concurrent update"
+\*UPDATE or SELECT FOR UPDATE raises error: "could not serialize access due to concurrent update"
 
 ### Which Level Should You Use?
 
@@ -1288,8 +1371,6 @@ SERIALIZABLE: Use when correctness requires preventing ALL anomalies.
   ⚠️  Higher abort rate under contention
 ─────────────────────────────────────────────────
 ```
-
-
 
 # Chapter 6: MVCC — PostgreSQL's Concurrency Engine
 
@@ -1585,8 +1666,6 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT id, balance FROM accounts WHERE id = 1;
 -- Should show: "Index Only Scan" if visibility map is up to date
 ```
 
-
-
 # Chapter 7: Deadlocks in PostgreSQL
 
 ## What Is a Deadlock?
@@ -1876,8 +1955,6 @@ WHERE wait_event_type = 'Lock';
 -- But possible with different WHERE clauses hitting different indexes
 -- Mitigation: batch updates, use SKIP LOCKED for queue-like patterns
 ```
-
-
 
 # Chapter 8: Real-World Locking Patterns in PostgreSQL
 
@@ -2185,8 +2262,6 @@ COMMIT;  -- advisory lock released
 -- The advisory lock prevents two workers from processing the same event
 -- simultaneously, even before the processed_events row is visible.
 ```
-
-
 
 # Chapter 9: Monitoring, Debugging & Performance Tuning
 
@@ -2568,25 +2643,23 @@ $$ LANGUAGE plpgsql;
 SELECT * FROM check_lock_health();
 ```
 
-
-
 # Chapter 10: PostgreSQL vs. MySQL/InnoDB — Lock Comparison & Quick Reference
 
 ## Architectural Differences
 
-| Feature | PostgreSQL | MySQL/InnoDB |
-|---------|-----------|--------------|
-| **MVCC implementation** | Tuple versioning in heap (xmin/xmax) | Undo log (rollback segment) |
-| **Dead tuple cleanup** | VACUUM (background autovacuum) | Purge thread (automatic) |
-| **Default isolation** | READ COMMITTED | REPEATABLE READ |
-| **Dirty reads possible?** | Never (even at READ UNCOMMITTED) | Yes, at READ UNCOMMITTED |
-| **Row lock storage** | In tuple header (t_xmax) | Lock manager (memory hash table) |
-| **Lock escalation** | Never | Never |
-| **Gap locks** | No (uses predicate locks at SERIALIZABLE only) | Yes (next-key locks at RR/S) |
-| **SERIALIZABLE implementation** | SSI (readers don't block writers) | Gap locks + S locks (readers block writers) |
-| **Advisory locks** | `pg_advisory_lock()` (rich API) | `GET_LOCK()` (basic) |
-| **Table lock modes** | 8 modes (fine-grained) | Basic (READ/WRITE) |
-| **Concurrent index creation** | `CREATE INDEX CONCURRENTLY` | None (InnoDB online DDL is partial) |
+| Feature                         | PostgreSQL                                     | MySQL/InnoDB                                |
+| ------------------------------- | ---------------------------------------------- | ------------------------------------------- |
+| **MVCC implementation**         | Tuple versioning in heap (xmin/xmax)           | Undo log (rollback segment)                 |
+| **Dead tuple cleanup**          | VACUUM (background autovacuum)                 | Purge thread (automatic)                    |
+| **Default isolation**           | READ COMMITTED                                 | REPEATABLE READ                             |
+| **Dirty reads possible?**       | Never (even at READ UNCOMMITTED)               | Yes, at READ UNCOMMITTED                    |
+| **Row lock storage**            | In tuple header (t_xmax)                       | Lock manager (memory hash table)            |
+| **Lock escalation**             | Never                                          | Never                                       |
+| **Gap locks**                   | No (uses predicate locks at SERIALIZABLE only) | Yes (next-key locks at RR/S)                |
+| **SERIALIZABLE implementation** | SSI (readers don't block writers)              | Gap locks + S locks (readers block writers) |
+| **Advisory locks**              | `pg_advisory_lock()` (rich API)                | `GET_LOCK()` (basic)                        |
+| **Table lock modes**            | 8 modes (fine-grained)                         | Basic (READ/WRITE)                          |
+| **Concurrent index creation**   | `CREATE INDEX CONCURRENTLY`                    | None (InnoDB online DDL is partial)         |
 
 ## MySQL/InnoDB Gap Locks and Next-Key Locks
 
@@ -2800,6 +2873,4 @@ START: Do you need to prevent concurrent modification?
 
 ---
 
-*End of tutorial. This guide covered database locking from fundamentals through advanced PostgreSQL internals. For further learning, read the [PostgreSQL documentation on Explicit Locking](https://www.postgresql.org/docs/current/explicit-locking.html) and the SSI paper by Cahill, Röhm, and Fekete (2008).*
-
-
+_End of tutorial. This guide covered database locking from fundamentals through advanced PostgreSQL internals. For further learning, read the [PostgreSQL documentation on Explicit Locking](https://www.postgresql.org/docs/current/explicit-locking.html) and the SSI paper by Cahill, Röhm, and Fekete (2008)._
