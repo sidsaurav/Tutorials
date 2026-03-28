@@ -27,13 +27,13 @@
 
 Apache Kafka is a **distributed event streaming platform** designed for:
 
-| Trait | What it means |
-|---|---|
-| **High throughput** | Millions of messages/sec on commodity hardware |
-| **Low latency** | Single-digit millisecond end-to-end |
-| **Durability** | Messages persisted to disk, replicated across brokers |
-| **Scalability** | Partitions allow horizontal scaling of reads and writes |
-| **Decoupling** | Producers and consumers are fully independent |
+| Trait               | What it means                                           |
+| ------------------- | ------------------------------------------------------- |
+| **High throughput** | Millions of messages/sec on commodity hardware          |
+| **Low latency**     | Single-digit millisecond end-to-end                     |
+| **Durability**      | Messages persisted to disk, replicated across brokers   |
+| **Scalability**     | Partitions allow horizontal scaling of reads and writes |
+| **Decoupling**      | Producers and consumers are fully independent           |
 
 ### Traditional Queue vs Kafka
 
@@ -78,14 +78,14 @@ Kafka:
 
 **Components at a glance:**
 
-| Component | Role |
-|---|---|
-| **Broker** | A single Kafka server. Stores data, serves clients. |
-| **Cluster** | A group of brokers working together. |
+| Component             | Role                                                                                                            |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **Broker**            | A single Kafka server. Stores data, serves clients.                                                             |
+| **Cluster**           | A group of brokers working together.                                                                            |
 | **ZooKeeper / KRaft** | Manages cluster metadata, leader elections. KRaft (Kafka Raft) is the newer built-in replacement for ZooKeeper. |
-| **Producer** | Pushes records to topics. |
-| **Consumer** | Pulls records from topics. |
-| **Consumer Group** | A set of consumers that cooperatively consume from a topic. |
+| **Producer**          | Pushes records to topics.                                                                                       |
+| **Consumer**          | Pulls records from topics.                                                                                      |
+| **Consumer Group**    | A set of consumers that cooperatively consume from a topic.                                                     |
 
 ---
 
@@ -119,6 +119,7 @@ Partition 2: [0] [1] [2] ...
 ```
 
 **Critical rules:**
+
 - **Ordering is guaranteed ONLY within a partition**, not across partitions.
 - Each partition lives on **one broker** (its leader), with replicas on others.
 - A consumer in a group reads from **one or more partitions**, but a partition is read by **at most one consumer** in the same group.
@@ -136,12 +137,12 @@ A single unit of data in Kafka:
 └──────────┴───────────┴───────────┴────────────┘
 ```
 
-| Field | Purpose |
-|---|---|
-| **Key** | Determines partition assignment (hash). `null` key → round-robin. Same key → same partition → ordering guarantee. |
-| **Value** | The actual payload (JSON, Avro, Protobuf, etc.) |
-| **Timestamp** | CreateTime (producer-set) or LogAppendTime (broker-set) |
-| **Headers** | Metadata key-value pairs (tracing IDs, content-type, etc.) |
+| Field         | Purpose                                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **Key**       | Determines partition assignment (hash). `null` key → round-robin. Same key → same partition → ordering guarantee. |
+| **Value**     | The actual payload (JSON, Avro, Protobuf, etc.)                                                                   |
+| **Timestamp** | CreateTime (producer-set) or LogAppendTime (broker-set)                                                           |
+| **Headers**   | Metadata key-value pairs (tracing IDs, content-type, etc.)                                                        |
 
 ### 3.4 Offsets
 
@@ -172,6 +173,7 @@ Topic "orders" (6 partitions) + Consumer Group "order-service" (3 consumers):
 ```
 
 **Rules:**
+
 - Each partition → exactly one consumer in the group.
 - If consumers > partitions → some consumers sit idle.
 - If consumers < partitions → some consumers handle multiple partitions.
@@ -184,6 +186,7 @@ Topic "orders" (6 partitions) + Consumer Group "order-service" (3 consumers):
 ### 4.1 What a Broker Does
 
 Each broker in the cluster:
+
 1. **Accepts** produce and fetch requests from clients.
 2. **Stores** records to local disk (in log segments).
 3. **Replicates** data to/from other brokers (follower replicas fetch from leader).
@@ -192,55 +195,13 @@ Each broker in the cluster:
 ### 4.2 Controller Broker
 
 One broker is elected as the **Controller**. It handles:
+
 - **Partition leader election** (when a broker dies).
 - **Reassigning partitions** (when brokers join/leave).
 - **Topic creation/deletion** propagation.
 - **ISR list management.**
 
 In ZooKeeper mode, the controller is elected via a ZK ephemeral node. In KRaft mode, it's elected via the Raft consensus protocol.
-
-### 4.3 Request Processing — The Network Thread Model
-
-Kafka uses a **Reactor pattern** for high-performance I/O:
-
-```
-                   ┌──────────────────┐
-  Client ────▶     │  Acceptor Thread  │   (1 per broker, listens on port)
-                   └────────┬─────────┘
-                            │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-      ┌──────────┐  ┌──────────┐  ┌──────────┐
-      │ Network  │  │ Network  │  │ Network  │   (num.network.threads = 3 default)
-      │ Thread 1 │  │ Thread 2 │  │ Thread 3 │
-      └─────┬────┘  └─────┬────┘  └─────┬────┘
-            │              │              │
-            └──────────────┼──────────────┘
-                           ▼
-                 ┌─────────────────┐
-                 │  Request Queue  │
-                 └────────┬────────┘
-                          │
-           ┌──────────────┼──────────────┐
-           ▼              ▼              ▼
-    ┌────────────┐ ┌────────────┐ ┌────────────┐
-    │  I/O       │ │  I/O       │ │  I/O       │  (num.io.threads = 8 default)
-    │  Thread 1  │ │  Thread 2  │ │  Thread 3  │
-    └────────────┘ └────────────┘ └────────────┘
-           │              │              │
-           └──────────────┼──────────────┘
-                          ▼
-                 ┌─────────────────┐
-                 │ Response Queue  │
-                 └─────────────────┘
-```
-
-1. **Acceptor** accepts new TCP connections and distributes them to Network threads.
-2. **Network threads** read the request from the socket, deserialize it, and place it in a shared **Request Queue**.
-3. **I/O threads** pick up requests, perform the actual work (disk read/write, replication fetch), and place the response in a **Response Queue**.
-4. **Network threads** send responses back to the client.
-
-> **Spring Boot tip:** You almost never tune these directly. But knowing this exists helps you understand why `max.in.flight.requests.per.connection` and `linger.ms` matter.
 
 ---
 
@@ -282,11 +243,20 @@ Kafka uses a **Reactor pattern** for high-performance I/O:
 
 ### 5.2 Partitioning Strategy
 
-| Scenario | Behavior |
-|---|---|
-| Key is `null`, no custom partitioner | **Sticky partitioner** (Kafka 2.4+): fills one batch, then switches partition. Before 2.4 was round-robin. |
-| Key is non-null | `hash(key) % numPartitions` — guarantees same key → same partition |
-| Custom partitioner configured | Your `Partitioner.partition()` implementation |
+| Scenario           | Behavior                                                                                                    |
+| ------------------ | ----------------------------------------------------------------------------------------------------------- |
+| Key is `null`      | **Sticky partitioner** (Kafka 2.4+). Optimizes batching by sticking to a partition until the batch is full. |
+| Key is non-null    | `hash(key) % numPartitions` — guarantees same key → same partition (if partition count is constant)     |
+| Custom partitioner | Your `Partitioner.partition()` implementation                                                               |
+
+#### The Sticky Partitioner (KIP-480)
+
+Introduced as the default in Kafka 2.4+ for records with **null keys**, the Sticky Partitioner is designed to improve batching efficiency:
+
+- Instead of the older round-robin approach (which led to many small, inefficient batches), it **"sticks"** to a single partition until that partition's batch is full (`batch.size`) or `linger.ms` expires.
+- Once the batch is sent, it selects a new random partition to "stick" to.
+
+**Why it matters:** It dramatically reduces latency and lowers broker/producer CPU usage by sending fewer but larger requests, while still distributing records evenly across all partitions over time.
 
 **Spring Boot configuration:**
 
@@ -304,10 +274,10 @@ spring:
 
 Kafka producers **don't send messages one by one**. They accumulate them in a **RecordBatch** per partition.
 
-| Config | Default | What it does |
-|---|---|---|
-| `batch.size` | 16384 (16 KB) | Max bytes per batch. Batch sent when this is full. |
-| `linger.ms` | 0 | How long to wait for more records before sending an incomplete batch. `0` = send immediately. |
+| Config          | Default          | What it does                                                                                  |
+| --------------- | ---------------- | --------------------------------------------------------------------------------------------- |
+| `batch.size`    | 16384 (16 KB)    | Max bytes per batch. Batch sent when this is full.                                            |
+| `linger.ms`     | 0                | How long to wait for more records before sending an incomplete batch. `0` = send immediately. |
 | `buffer.memory` | 33554432 (32 MB) | Total buffer memory for all unsent batches. If exhausted, `send()` blocks for `max.block.ms`. |
 
 **How they interact:**
@@ -319,6 +289,8 @@ Record arrives → placed in batch for its partition
   └── Otherwise                       → Wait for more records
 ```
 
+> **Note:** Records that arrive close together in time will generally batch together even with `linger.ms=0`, so under heavy load batching will occur regardless of the linger configuration.
+
 > **Tip:** In Spring Boot, set `linger.ms=5` to `20` and increase `batch.size` for higher throughput at the cost of slight latency.
 
 ```yaml
@@ -327,20 +299,25 @@ spring:
     producer:
       properties:
         linger.ms: 10
-        batch.size: 32768  # 32 KB
+        batch.size: 32768 # 32 KB
 ```
 
 ### 5.4 Acknowledgements — `acks`
 
 This determines **when the broker considers a write successful**:
 
-| Value | Behavior | Durability | Speed |
-|---|---|---|---|
-| `acks=0` | Don't wait for any acknowledgment | **Lowest** (fire-and-forget) | Fastest |
-| `acks=1` | Wait for leader to write to its local log | **Medium** (leader crash → data loss) | Fast |
-| `acks=all` (or `-1`) | Wait for **all in-sync replicas (ISR)** to acknowledge | **Highest** | Slowest |
+| Value                | Behavior                                               | Durability                            | Speed   |
+| -------------------- | ------------------------------------------------------ | ------------------------------------- | ------- |
+| `acks=0`             | Don't wait for any acknowledgment                      | **Lowest** (fire-and-forget)          | Fastest |
+| `acks=1`             | Wait for leader to write to its local log              | **Medium** (leader crash → data loss) | Fast    |
+| `acks=all` (or `-1`) | Wait for **all in-sync replicas (ISR)** to acknowledge | **Highest**                           | Slowest |
 
-> **Always use `acks=all` for production systems.** Combine with `min.insync.replicas=2` on the topic/broker.
+#### How `acks` Affects Latency
+
+- **Producer Latency:** The time the _producer_ waits for a response from the broker. `acks=all` increases producer latency because the leader must wait for all in-sync replicas (ISR) to acknowledge the write before responding to the producer. `acks=1` has lower producer latency because the leader responds immediately after writing to its own log.
+- **End-to-End Latency:** The time from when a message is produced to when it is available for a _consumer_ to read. **Crucially, consumers can only read messages up to the High Watermark (messages replicated to all ISRs).** Therefore, `acks=1` and `acks=all` have virtually the **same end-to-end latency**. Even if the producer receives a faster acknowledgment with `acks=1`, the consumer still must wait for the replication to finish before the message becomes visible.
+
+> **Always use `acks=all` for production systems.** Combine with `min.insync.replicas=2` on the topic/broker. It maximizes durability without penalizing consumer end-to-end latency!
 
 ```yaml
 spring:
@@ -349,27 +326,40 @@ spring:
       acks: all
 ```
 
-### 5.5 Retries & Idempotence
+### 5.5 Retries, Idempotence, & Ordering
 
-| Config | Default | Purpose |
-|---|---|---|
-| `retries` | 2147483647 (effectively infinite) | Number of times to retry a failed send |
-| `retry.backoff.ms` | 100 | Delay between retries |
-| `delivery.timeout.ms` | 120000 (2 min) | Total time from `send()` to success/failure including retries |
-| `max.in.flight.requests.per.connection` | 5 | How many unacknowledged requests per broker connection |
-| `enable.idempotence` | `true` (Kafka 3.0+) | Prevents duplicates from network retries |
+| Config                                  | Default                           | Purpose                                                       |
+| --------------------------------------- | --------------------------------- | ------------------------------------------------------------- |
+| `retries`                               | 2147483647 (effectively infinite) | Number of times to retry a failed send                        |
+| `retry.backoff.ms`                      | 100                               | Delay between retries                                         |
+| `delivery.timeout.ms`                   | 120000 (2 min)                    | Total time from `send()` to success/failure including retries |
+| `max.in.flight.requests.per.connection` | 5                                 | How many unacknowledged requests per broker connection        |
+| `enable.idempotence`                    | `true` (Kafka 3.0+)               | Prevents duplicates and preserves ordering during retries     |
 
-**Idempotent Producer** (the default now):
-- The broker assigns a **Producer ID (PID)** and **sequence number** per partition.
-- If the broker sees a duplicate `(PID, seq)`, it silently deduplicates.
-- Requires: `acks=all`, `max.in.flight.requests.per.connection <= 5`.
+#### The Idempotent Producer
+
+Without idempotence, a network timeout during an acknowledgment can cause the producer to retry a successfully written batch, creating **duplicate messages**.
+
+When `enable.idempotence=true` (default since Kafka 3.0):
+
+- **Deduplication:** The broker assigns the producer a **Producer ID (PID)** and tracks the **sequence number** of each message. If a retry sends an already-written sequence number, the broker safely ignores the duplicate.
+- **Enforced Configs:** Enabling it automatically requires `acks=all`, `retries > 0`, and `max.in.flight.requests.per.connection <= 5` to ensure data safety and strict ordering.
+
+#### Message Ordering Guarantees
+
+If `max.in.flight.requests.per.connection` > 1 without idempotence, a failed batch that is being retried might be written _after_ a later batch that succeeded on the first try, **breaking message order**.
+
+**With Idempotence enabled:**
+The broker uses the sequence numbers to detect out-of-order batches. If Batch 2 (seq=2) arrives before a retried Batch 1 (seq=1), the broker buffers Batch 2 and waits for Batch 1 to succeed first, **guaranteeing order**. (This guarentee holds as long as `max.in.flight.requests.per.connection` is less than or equal to 5).
+
+> **Important:** Kafka ordering is **strictly per-partition**. To ensure related messages are processed in order across your system, always publish them with the **same message key** so they land in the same partition. *(Note: This key-to-partition mapping is only consistent as long as the total number of partitions does not change!)*
 
 ```yaml
 spring:
   kafka:
     producer:
       properties:
-        enable.idempotence: true       # default since Kafka 3.0
+        enable.idempotence: true # Default since Kafka 3.0
         max.in.flight.requests.per.connection: 5
 ```
 
@@ -377,13 +367,13 @@ spring:
 
 Messages can be compressed at the producer level (and optionally recompressed at the broker):
 
-| Type | Ratio | CPU | Notes |
-|---|---|---|---|
-| `none` | — | — | No compression |
-| `gzip` | Best | Highest | Good for text-heavy payloads |
-| `snappy` | Good | Low | Best balance for most use cases |
-| `lz4` | Good | Lowest | Fastest compression |
-| `zstd` | Best | Medium | Best ratio with decent speed (Kafka 2.1+) |
+| Type     | Ratio | CPU     | Notes                                     |
+| -------- | ----- | ------- | ----------------------------------------- |
+| `none`   | —     | —       | No compression                            |
+| `gzip`   | Best  | Highest | Good for text-heavy payloads              |
+| `snappy` | Good  | Low     | Best balance for most use cases           |
+| `lz4`    | Good  | Lowest  | Fastest compression                       |
+| `zstd`   | Best  | Medium  | Best ratio with decent speed (Kafka 2.1+) |
 
 ```yaml
 spring:
@@ -470,12 +460,12 @@ spring:
 
 #### Assignment Strategies
 
-| Strategy | Behavior |
-|---|---|
-| `RangeAssignor` | Assigns partition ranges per topic to consumers. Can cause imbalance across topics. |
-| `RoundRobinAssignor` | Distributes partitions one by one across consumers. Better balance. |
-| `StickyAssignor` | Like round-robin but tries to keep previous assignments. Minimizes partition movement. |
-| `CooperativeStickyAssignor` | Same as Sticky but uses incremental cooperative rebalancing. **Recommended.** |
+| Strategy                    | Behavior                                                                               |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `RangeAssignor`             | Assigns partition ranges per topic to consumers. Can cause imbalance across topics.    |
+| `RoundRobinAssignor`        | Distributes partitions one by one across consumers. Better balance.                    |
+| `StickyAssignor`            | Like round-robin but tries to keep previous assignments. Minimizes partition movement. |
+| `CooperativeStickyAssignor` | Same as Sticky but uses incremental cooperative rebalancing. **Recommended.**          |
 
 ### 6.3 Offset Management
 
@@ -490,11 +480,11 @@ Value: (offset, metadata, timestamp)
 
 #### Commit Strategies
 
-| Strategy | How | Trade-off |
-|---|---|---|
-| **Auto-commit** | Offsets committed every `auto.commit.interval.ms` (default 5000ms) | Simple but can lose or reprocess messages on crash |
-| **Manual sync commit** | `consumer.commitSync()` | Blocks until committed. Safest. |
-| **Manual async commit** | `consumer.commitAsync()` | Non-blocking. May lose commits on failure. |
+| Strategy                | How                                                                | Trade-off                                          |
+| ----------------------- | ------------------------------------------------------------------ | -------------------------------------------------- |
+| **Auto-commit**         | Offsets committed every `auto.commit.interval.ms` (default 5000ms) | Simple but can lose or reprocess messages on crash |
+| **Manual sync commit**  | `consumer.commitSync()`                                            | Blocks until committed. Safest.                    |
+| **Manual async commit** | `consumer.commitAsync()`                                           | Non-blocking. May lose commits on failure.         |
 
 **Spring Boot — AckMode options:**
 
@@ -502,19 +492,19 @@ Value: (offset, metadata, timestamp)
 spring:
   kafka:
     consumer:
-      enable-auto-commit: false   # Recommended: let Spring manage it
+      enable-auto-commit: false # Recommended: let Spring manage it
     listener:
-      ack-mode: MANUAL_IMMEDIATE  # or RECORD, BATCH, TIME, COUNT, MANUAL
+      ack-mode: MANUAL_IMMEDIATE # or RECORD, BATCH, TIME, COUNT, MANUAL
 ```
 
-| AckMode | Behavior |
-|---|---|
-| `RECORD` | Commit after each record is processed |
-| `BATCH` | Commit after all records from `poll()` are processed (default) |
-| `TIME` | Commit after a time interval |
-| `COUNT` | Commit after N records |
-| `MANUAL` | You call `acknowledgment.acknowledge()` yourself, committed when next poll or container stop |
-| `MANUAL_IMMEDIATE` | Commits immediately when you call `acknowledge()` |
+| AckMode            | Behavior                                                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------- |
+| `RECORD`           | Commit after each record is processed                                                        |
+| `BATCH`            | Commit after all records from `poll()` are processed (default)                               |
+| `TIME`             | Commit after a time interval                                                                 |
+| `COUNT`            | Commit after N records                                                                       |
+| `MANUAL`           | You call `acknowledgment.acknowledge()` yourself, committed when next poll or container stop |
+| `MANUAL_IMMEDIATE` | Commits immediately when you call `acknowledge()`                                            |
 
 ### 6.4 Fetch Internals
 
@@ -530,13 +520,13 @@ poll(timeout)
   └── Meanwhile, a background Fetcher thread pre-fetches from brokers
 ```
 
-| Config | Default | Purpose |
-|---|---|---|
-| `fetch.min.bytes` | 1 | Min data the broker should return. Higher = fewer requests, more latency. |
-| `fetch.max.wait.ms` | 500 | Max time broker waits to accumulate `fetch.min.bytes`. |
-| `max.partition.fetch.bytes` | 1048576 (1 MB) | Max data per partition per fetch. |
-| `max.poll.records` | 500 | Max records returned per `poll()` call. |
-| `max.poll.interval.ms` | 300000 (5 min) | Max time between `poll()` calls before consumer is considered dead. |
+| Config                      | Default        | Purpose                                                                   |
+| --------------------------- | -------------- | ------------------------------------------------------------------------- |
+| `fetch.min.bytes`           | 1              | Min data the broker should return. Higher = fewer requests, more latency. |
+| `fetch.max.wait.ms`         | 500            | Max time broker waits to accumulate `fetch.min.bytes`.                    |
+| `max.partition.fetch.bytes` | 1048576 (1 MB) | Max data per partition per fetch.                                         |
+| `max.poll.records`          | 500            | Max records returned per `poll()` call.                                   |
+| `max.poll.interval.ms`      | 300000 (5 min) | Max time between `poll()` calls before consumer is considered dead.       |
 
 > **Critical:** If your processing takes longer than `max.poll.interval.ms`, the coordinator will **kick the consumer out** of the group, triggering a rebalance. Tune this carefully.
 
@@ -549,8 +539,8 @@ spring:
   kafka:
     consumer:
       properties:
-        group.instance.id: order-consumer-1   # unique per instance
-        session.timeout.ms: 60000             # longer timeout for restarts
+        group.instance.id: order-consumer-1 # unique per instance
+        session.timeout.ms: 60000 # longer timeout for restarts
 ```
 
 If the consumer reconnects within `session.timeout.ms`, it gets the **same partitions back without a rebalance**.
@@ -576,6 +566,7 @@ Topic "orders", replication-factor=3, partitions=2:
 ### 7.2 In-Sync Replicas (ISR)
 
 A replica is **in-sync** if:
+
 1. It has an active session with the controller (heartbeat within `zookeeper.session.timeout.ms` or equivalent).
 2. It has fetched data from the leader within **`replica.lag.time.max.ms`** (default 30 seconds).
 
@@ -613,6 +604,7 @@ When a partition leader dies:
 4. Producers and consumers automatically discover the new leader via metadata refresh.
 
 **Unclean leader election** (`unclean.leader.election.enable=false` by default):
+
 - If ALL ISR replicas are dead, the partition goes **offline** rather than promoting an out-of-sync replica.
 - Setting this to `true` risks data loss but maintains availability.
 
@@ -667,6 +659,7 @@ A partition's log is split into **segments**:
 To find a specific offset without scanning the entire segment, Kafka uses **sparse indexes**:
 
 **Offset Index** (`.index`):
+
 ```
 Relative Offset → Physical Position (byte offset in .log file)
 4                → 320
@@ -676,6 +669,7 @@ Relative Offset → Physical Position (byte offset in .log file)
 ```
 
 **Timestamp Index** (`.timeindex`):
+
 ```
 Timestamp         → Relative Offset
 1677654321000     → 4
@@ -684,6 +678,7 @@ Timestamp         → Relative Offset
 ```
 
 Lookup process:
+
 1. **Binary search** the segment files to find the right segment.
 2. **Binary search** the `.index` to find the nearest offset ≤ target.
 3. **Sequential scan** from that position in the `.log` file.
@@ -711,11 +706,11 @@ RecordBatch:
 
 ### 8.5 Retention Policies
 
-| Policy | Config | Default | Behavior |
-|---|---|---|---|
-| **Time-based** | `log.retention.hours` / `log.retention.ms` | 168 hours (7 days) | Delete segments older than this |
-| **Size-based** | `log.retention.bytes` | -1 (unlimited) | Delete oldest segments when partition exceeds this size |
-| **Compaction** | `log.cleanup.policy=compact` | — | Keep only the **latest value per key** |
+| Policy         | Config                                     | Default            | Behavior                                                |
+| -------------- | ------------------------------------------ | ------------------ | ------------------------------------------------------- |
+| **Time-based** | `log.retention.hours` / `log.retention.ms` | 168 hours (7 days) | Delete segments older than this                         |
+| **Size-based** | `log.retention.bytes`                      | -1 (unlimited)     | Delete oldest segments when partition exceeds this size |
+| **Compaction** | `log.cleanup.policy=compact`               | —                  | Keep only the **latest value per key**                  |
 
 ### 8.6 Log Compaction — Deep Dive
 
@@ -749,11 +744,11 @@ After compaction:
 
 ### 9.1 Delivery Guarantees Spectrum
 
-| Guarantee | Description | How |
-|---|---|---|
-| **At-most-once** | Messages may be lost, never duplicated | Consumer commits **before** processing |
-| **At-least-once** | Messages are never lost, but may be duplicated | Consumer commits **after** processing |
-| **Exactly-once** | Messages are neither lost nor duplicated | Idempotent producer + Transactions |
+| Guarantee         | Description                                    | How                                    |
+| ----------------- | ---------------------------------------------- | -------------------------------------- |
+| **At-most-once**  | Messages may be lost, never duplicated         | Consumer commits **before** processing |
+| **At-least-once** | Messages are never lost, but may be duplicated | Consumer commits **after** processing  |
+| **Exactly-once**  | Messages are neither lost nor duplicated       | Idempotent producer + Transactions     |
 
 ### 9.2 Transactional Producer
 
@@ -772,6 +767,7 @@ try {
 ```
 
 **What happens internally:**
+
 1. Producer registers with a **Transaction Coordinator** (a broker).
 2. Coordinator assigns a **transactional.id** → PID mapping (persisted in `__transaction_state` topic).
 3. During the transaction, all produced records are "`uncommitted`."
@@ -784,7 +780,7 @@ try {
 spring:
   kafka:
     producer:
-      transaction-id-prefix: tx-order-  # enables transactions
+      transaction-id-prefix: tx-order- # enables transactions
 ```
 
 ```java
@@ -848,6 +844,7 @@ Kafka **does not manage its own cache**. It relies entirely on the OS **page cac
 ### 10.4 Batching & Compression
 
 As discussed in Section 5, batching allows:
+
 - **Fewer network round-trips** (many records in one request).
 - **Better compression** (compressing a batch vs individual records).
 - **Fewer disk writes** (entire batch written as one unit).
@@ -865,12 +862,14 @@ As discussed in Section 5, batching allows:
 ### 11.1 ZooKeeper Mode (Legacy)
 
 ZooKeeper stored:
+
 - **Broker registration** (which brokers are alive).
 - **Topic configuration** (partition count, replication factor).
 - **Controller election** (which broker is the controller).
 - **ACLs** (access control lists).
 
 **Problems:**
+
 - External dependency, separate deployment.
 - Scalability bottleneck (ZK becomes a bottleneck at ~200K partitions).
 - Operational complexity (managing 2 systems instead of 1).
@@ -895,6 +894,7 @@ KRaft Architecture:
 ```
 
 **Benefits:**
+
 - No external dependency.
 - Supports millions of partitions.
 - Faster controller failover (seconds vs minutes).
@@ -946,6 +946,7 @@ Producer                                      Consumer
 ```
 
 This brings in:
+
 - `spring-kafka` — Spring's Kafka abstraction layer
 - `kafka-clients` — The official Apache Kafka Java client
 
@@ -972,7 +973,7 @@ spring:
       group-id: my-service
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
-      auto-offset-reset: earliest   # or 'latest'
+      auto-offset-reset: earliest # or 'latest'
       enable-auto-commit: false
       properties:
         spring.json.trusted.packages: "com.example.dto"
@@ -984,8 +985,8 @@ spring:
 
     listener:
       ack-mode: MANUAL_IMMEDIATE
-      concurrency: 3              # number of consumer threads
-      type: single                # or 'batch' for batch listeners
+      concurrency: 3 # number of consumer threads
+      type: single # or 'batch' for batch listeners
 ```
 
 ### 13.3 Spring Kafka Architecture
@@ -1259,13 +1260,13 @@ class OrderProducerTest {
 
 ### 14.1 Partition Count — Choose Wisely
 
-| Factor | Guidance |
-|---|---|
-| **Throughput target** | Measure single-partition throughput. `total_throughput / single_partition_throughput = min partitions` |
-| **Consumer parallelism** | Max consumers in a group = partition count |
-| **Ordering** | More partitions = less ordering guarantees (ordering is per-partition only) |
-| **Overhead** | Each partition = open file handles, memory. Don't go above 10K per broker. |
-| **Cannot reduce** | You can add partitions but NEVER reduce them without recreating the topic. |
+| Factor                   | Guidance                                                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| **Throughput target**    | Measure single-partition throughput. `total_throughput / single_partition_throughput = min partitions` |
+| **Consumer parallelism** | Max consumers in a group = partition count                                                             |
+| **Ordering**             | More partitions = less ordering guarantees (ordering is per-partition only)                            |
+| **Overhead**             | Each partition = open file handles, memory. Don't go above 10K per broker.                             |
+| **Cannot reduce**        | You can add partitions but NEVER reduce them without recreating the topic.                             |
 
 > **Rule of thumb:** Start with `6 × broker_count` partitions for a general-purpose topic.
 
@@ -1316,12 +1317,12 @@ ALL THREE MUST BE CONSISTENT. If producer sends a 5 MB message:
 
 **Causes & Fixes:**
 
-| Cause | Fix |
-|---|---|
+| Cause                     | Fix                                                          |
+| ------------------------- | ------------------------------------------------------------ |
 | Processing takes too long | Increase `max.poll.interval.ms`, decrease `max.poll.records` |
-| JVM GC pauses | Tune GC, increase `session.timeout.ms` |
-| Frequent deploys | Use static group membership (`group.instance.id`) |
-| Eager rebalancing | Switch to `CooperativeStickyAssignor` |
+| JVM GC pauses             | Tune GC, increase `session.timeout.ms`                       |
+| Frequent deploys          | Use static group membership (`group.instance.id`)            |
+| Eager rebalancing         | Switch to `CooperativeStickyAssignor`                        |
 
 ### 14.5 Ordering Guarantees
 
@@ -1338,14 +1339,14 @@ Need ordering per entity (e.g., per user, per order)?
 
 ### 14.6 Quick Reference — Common Exceptions
 
-| Exception | Meaning | Fix |
-|---|---|---|
-| `NotEnoughReplicasException` | ISR count < `min.insync.replicas` | Add brokers, wait for replicas to catch up |
-| `RecordTooLargeException` | Message exceeds `message.max.bytes` | Increase limits or compress/split messages |
-| `TimeoutException` | `delivery.timeout.ms` expired | Check broker health, network, increase timeout |
-| `SerializationException` | Cannot serialize/deserialize | Fix schema, check serializer config |
-| `CommitFailedException` | Offset commit failed (rebalance in progress) | Handle in error handler, use manual commits |
-| `RebalanceInProgressException` | Consumer group is rebalancing | Wait, use cooperative rebalancing |
+| Exception                      | Meaning                                      | Fix                                            |
+| ------------------------------ | -------------------------------------------- | ---------------------------------------------- |
+| `NotEnoughReplicasException`   | ISR count < `min.insync.replicas`            | Add brokers, wait for replicas to catch up     |
+| `RecordTooLargeException`      | Message exceeds `message.max.bytes`          | Increase limits or compress/split messages     |
+| `TimeoutException`             | `delivery.timeout.ms` expired                | Check broker health, network, increase timeout |
+| `SerializationException`       | Cannot serialize/deserialize                 | Fix schema, check serializer config            |
+| `CommitFailedException`        | Offset commit failed (rebalance in progress) | Handle in error handler, use manual commits    |
+| `RebalanceInProgressException` | Consumer group is rebalancing                | Wait, use cooperative rebalancing              |
 
 ---
 
@@ -1353,33 +1354,33 @@ Need ordering per entity (e.g., per user, per order)?
 
 ### Producer
 
-| Config | Recommended | Why |
-|---|---|---|
-| `acks` | `all` | Maximum durability |
-| `enable.idempotence` | `true` | Prevent duplicates |
-| `linger.ms` | `10-20` | Better batching |
-| `batch.size` | `32768` | 32 KB batches |
-| `compression.type` | `snappy` | Good balance |
-| `max.in.flight.requests.per.connection` | `5` | Max allowed with idempotence |
+| Config                                  | Recommended | Why                          |
+| --------------------------------------- | ----------- | ---------------------------- |
+| `acks`                                  | `all`       | Maximum durability           |
+| `enable.idempotence`                    | `true`      | Prevent duplicates           |
+| `linger.ms`                             | `10-20`     | Better batching              |
+| `batch.size`                            | `32768`     | 32 KB batches                |
+| `compression.type`                      | `snappy`    | Good balance                 |
+| `max.in.flight.requests.per.connection` | `5`         | Max allowed with idempotence |
 
 ### Consumer
 
-| Config | Recommended | Why |
-|---|---|---|
-| `enable.auto.commit` | `false` | Let Spring manage commits |
-| `auto.offset.reset` | `earliest` | Don't miss messages on first run |
-| `max.poll.records` | `100-500` | Control batch size per poll |
-| `max.poll.interval.ms` | Based on processing | Prevent unnecessary rebalances |
-| `partition.assignment.strategy` | `CooperativeStickyAssignor` | Smoother rebalances |
+| Config                          | Recommended                 | Why                              |
+| ------------------------------- | --------------------------- | -------------------------------- |
+| `enable.auto.commit`            | `false`                     | Let Spring manage commits        |
+| `auto.offset.reset`             | `earliest`                  | Don't miss messages on first run |
+| `max.poll.records`              | `100-500`                   | Control batch size per poll      |
+| `max.poll.interval.ms`          | Based on processing         | Prevent unnecessary rebalances   |
+| `partition.assignment.strategy` | `CooperativeStickyAssignor` | Smoother rebalances              |
 
 ### Broker / Topic
 
-| Config | Recommended | Why |
-|---|---|---|
-| `replication.factor` | `3` | Survive 1 broker failure |
-| `min.insync.replicas` | `2` | With acks=all, survive 1 broker failure |
-| `unclean.leader.election.enable` | `false` | Prevent data loss |
-| `log.retention.hours` | Based on use case | 7 days default, adjust as needed |
+| Config                           | Recommended       | Why                                     |
+| -------------------------------- | ----------------- | --------------------------------------- |
+| `replication.factor`             | `3`               | Survive 1 broker failure                |
+| `min.insync.replicas`            | `2`               | With acks=all, survive 1 broker failure |
+| `unclean.leader.election.enable` | `false`           | Prevent data loss                       |
+| `log.retention.hours`            | Based on use case | 7 days default, adjust as needed        |
 
 ---
 
