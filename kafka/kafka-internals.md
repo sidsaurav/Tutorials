@@ -246,7 +246,7 @@ In ZooKeeper mode, the controller is elected via a ZK ephemeral node. In KRaft m
 | Scenario           | Behavior                                                                                                    |
 | ------------------ | ----------------------------------------------------------------------------------------------------------- |
 | Key is `null`      | **Sticky partitioner** (Kafka 2.4+). Optimizes batching by sticking to a partition until the batch is full. |
-| Key is non-null    | `hash(key) % numPartitions` — guarantees same key → same partition (if partition count is constant)     |
+| Key is non-null    | `hash(key) % numPartitions` — guarantees same key → same partition (if partition count is constant)         |
 | Custom partitioner | Your `Partitioner.partition()` implementation                                                               |
 
 #### The Sticky Partitioner (KIP-480)
@@ -352,7 +352,7 @@ If `max.in.flight.requests.per.connection` > 1 without idempotence, a failed bat
 **With Idempotence enabled:**
 The broker uses the sequence numbers to detect out-of-order batches. If Batch 2 (seq=2) arrives before a retried Batch 1 (seq=1), the broker buffers Batch 2 and waits for Batch 1 to succeed first, **guaranteeing order**. (This guarentee holds as long as `max.in.flight.requests.per.connection` is less than or equal to 5).
 
-> **Important:** Kafka ordering is **strictly per-partition**. To ensure related messages are processed in order across your system, always publish them with the **same message key** so they land in the same partition. *(Note: This key-to-partition mapping is only consistent as long as the total number of partitions does not change!)*
+> **Important:** Kafka ordering is **strictly per-partition**. To ensure related messages are processed in order across your system, always publish them with the **same message key** so they land in the same partition. _(Note: This key-to-partition mapping is only consistent as long as the total number of partitions does not change!)_
 
 ```yaml
 spring:
@@ -423,27 +423,26 @@ How the coordinator is found:
   Leader of that partition → Group Coordinator
 ```
 
+#### Why rebalancing is needed?
+
+When a consumer joins or leaves the group, the partitions need to be redistributed among the remaining consumers.
+If a consumer fails to send a heartbeat to the coordinator within the `session.timeout.ms` period, it is considered dead and a rebalance is triggered.
+If a consumer closes cleanly, it will send a leave group request to the coordinator and a rebalance will be triggered immediately.
+
 #### Rebalancing Protocol (Eager — Old Default)
 
-When a consumer joins/leaves the group, a **rebalance** is triggered:
-
 ```
-1. Consumer sends JoinGroup request to Coordinator
-2. Coordinator picks a "Group Leader" (first consumer to join)
-3. Coordinator sends member list to Group Leader
-4. Group Leader runs partition assignment strategy → sends result back
-5. Coordinator distributes assignments to each consumer via SyncGroup response
-
-During rebalance: ALL consumers stop consuming (Stop-the-World)
+All consumers stop consuming, give up their ownership of all partitions, rejoin the consumer group, and get a brand-new partition assignment. This is essentially a short window of unavailability of the entire consumer group. The length of the window depends on the size of the consumer group as well as on several configuration parameters.
 ```
 
-#### Cooperative Sticky Rebalancing (New Default — Kafka 2.4+)
+#### Cooperative Rebalancing (New Default — Kafka 2.4+)
 
 ```
 Instead of revoking ALL partitions and reassigning:
 1. Only partitions that need to move are revoked
 2. Other consumers continue consuming unaffected partitions
 3. Revoked partitions are assigned in a second rebalance round
+4. This process might take two or more rounds to achieve the stable assignment.
 
 Result: Minimal disruption, near-zero downtime
 ```
@@ -458,16 +457,25 @@ spring:
         partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
 ```
 
-#### Assignment Strategies
+### 6.3 Static Group Membership
 
-| Strategy                    | Behavior                                                                               |
-| --------------------------- | -------------------------------------------------------------------------------------- |
-| `RangeAssignor`             | Assigns partition ranges per topic to consumers. Can cause imbalance across topics.    |
-| `RoundRobinAssignor`        | Distributes partitions one by one across consumers. Better balance.                    |
-| `StickyAssignor`            | Like round-robin but tries to keep previous assignments. Minimizes partition movement. |
-| `CooperativeStickyAssignor` | Same as Sticky but uses incremental cooperative rebalancing. **Recommended.**          |
+Every consumer in a group has a `group.instance.id` configuration property:
 
-### 6.3 Offset Management
+- **If not set:** The broker assigns a random, unique member ID on startup. If the consumer restarts, it gets a new ID, triggering an immediate rebalance.
+- **If set:** The consumer becomes a **static member**.
+
+When a static member leaves or disconnects, the broker will wait for the `session.timeout.ms` duration before triggering a rebalance. If the consumer reconnects within that timeframe, it gets the **same partitions back without a rebalance**.
+
+```yaml
+spring:
+  kafka:
+    consumer:
+      properties:
+        group.instance.id: order-consumer-1 # should be unique per instance
+        session.timeout.ms: 60000 # wait 60s before rebalancing if consumer dies
+```
+
+### 6.4 Offset Management
 
 #### Where Are Offsets Stored?
 
@@ -506,7 +514,7 @@ spring:
 | `MANUAL`           | You call `acknowledgment.acknowledge()` yourself, committed when next poll or container stop |
 | `MANUAL_IMMEDIATE` | Commits immediately when you call `acknowledge()`                                            |
 
-### 6.4 Fetch Internals
+### 6.5 Fetch Internals
 
 When a consumer calls `poll()`, here's what actually happens:
 
@@ -529,21 +537,6 @@ poll(timeout)
 | `max.poll.interval.ms`      | 300000 (5 min) | Max time between `poll()` calls before consumer is considered dead.       |
 
 > **Critical:** If your processing takes longer than `max.poll.interval.ms`, the coordinator will **kick the consumer out** of the group, triggering a rebalance. Tune this carefully.
-
-### 6.5 Static Group Membership
-
-By default, every time a consumer restarts, it gets a new `member.id` and triggers a rebalance. **Static membership** avoids this:
-
-```yaml
-spring:
-  kafka:
-    consumer:
-      properties:
-        group.instance.id: order-consumer-1 # unique per instance
-        session.timeout.ms: 60000 # longer timeout for restarts
-```
-
-If the consumer reconnects within `session.timeout.ms`, it gets the **same partitions back without a rebalance**.
 
 ---
 
